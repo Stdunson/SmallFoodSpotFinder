@@ -179,3 +179,56 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Swift / iOS Development
+# Xcode
+build/
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+xcuserdata/
+*.xcarchive
+DerivedData/
+*.hmap
+
+# Swift Package Manager
+.build/
+.swiftpm/
+*.xcconfig
+Package.resolved
+
+# CocoaPods
+Pods/
+Podfile.lock
+
+# Carthage
+Carthage/
+Cartfile.resolved
+
+# Ruby Version Manager
+.rvmrc
+.ruby-version
+.ruby-gemset
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+*.swiftformat
+
+# Certificates and provisioning profiles
+*.p8
+*.p12
+*.mobileprovision
+*.ipa
+
+# Misc
+*.dSYM
+*.app
+.playground/
