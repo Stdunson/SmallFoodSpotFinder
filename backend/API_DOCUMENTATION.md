@@ -47,14 +47,13 @@ Access API docs at: `http://localhost:8000/docs`
 ### 1. Discovery Recommendations
 **Endpoint:** `POST /discovery`  
 **Rate Limit:** 10 requests/minute  
-**Purpose:** Get automatic restaurant recommendations for the discovery view
+**Purpose:** Get automatic restaurant recommendations for the discovery view (iOS app handles location only)
 
 #### Request Body
 ```json
 {
   "latitude": 40.7128,
-  "longitude": -74.0060,
-  "num_recommendations": 3
+  "longitude": -74.0060
 }
 ```
 
@@ -63,7 +62,6 @@ Access API docs at: `http://localhost:8000/docs`
 |-----------|------|----------|-------------|
 | latitude | float | Yes | User's latitude (-90 to 90) |
 | longitude | float | Yes | User's longitude (-180 to 180) |
-| num_recommendations | int | No | Number of spots (1-10, default: 3) |
 
 #### Response (200 OK)
 ```json
@@ -112,19 +110,19 @@ Access API docs at: `http://localhost:8000/docs`
 
 ---
 
-### 2. Search Restaurants with Filters
+### 2. Map/Search with Filters
 **Endpoint:** `POST /search`  
 **Rate Limit:** 20 requests/minute  
-**Purpose:** Search restaurants with filters for map display
+**Purpose:** Search restaurants with optional multi-select filters for map display
 
 #### Request Body
 ```json
 {
   "latitude": 40.7128,
   "longitude": -74.0060,
+  "categories": ["italian_restaurant", "pizza"],
+  "price_categories": [1, 2],
   "distance_miles": 10,
-  "category": "italian_restaurant",
-  "price_level": 2,
   "search_query": "pasta"
 }
 ```
@@ -134,10 +132,10 @@ Access API docs at: `http://localhost:8000/docs`
 |-----------|------|----------|-------------|
 | latitude | float | Yes | User's latitude (-90 to 90) |
 | longitude | float | Yes | User's longitude (-180 to 180) |
-| distance_miles | float | No | Search radius (1-50, default: 10) |
-| category | string | No | Restaurant category (e.g., "italian_restaurant") |
-| price_level | int | No | Price level (0-4: Free, $, $$, $$$, $$$$) |
-| search_query | string | No | Text search query |
+| categories | array[string] | No | Restaurant categories (multi-select, e.g., ["italian_restaurant", "pizza"]) |
+| price_categories | array[int] | No | Price levels (multi-select, 0=Free, 1=$, 2=$$, 3=$$$, 4=$$$$) |
+| distance_miles | float | No | Search radius in miles (1-50, default: 10) |
+| search_query | string | No | Text search query from search bar |
 
 #### Response (200 OK)
 ```json
@@ -149,8 +147,8 @@ Access API docs at: `http://localhost:8000/docs`
   },
   "search_params": {
     "distance_miles": 10,
-    "category": "italian_restaurant",
-    "price_level": 2
+    "categories": ["italian_restaurant"],
+    "price_categories": [1, 2]
   },
   "results": [
     {
@@ -194,11 +192,18 @@ Access API docs at: `http://localhost:8000/docs`
 ---
 
 ### 3. Restaurant Details
-**Endpoint:** `GET /restaurant/{restaurant_id}`  
+**Endpoint:** `POST /restaurant/details`  
 **Rate Limit:** 30 requests/minute  
-**Purpose:** Get detailed information for a restaurant
+**Purpose:** Get restaurant details for the detail view (restaurant ID only input)
 
-#### Path Parameters
+#### Request Body
+```json
+{
+  "restaurant_id": 123
+}
+```
+
+#### Parameters
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | restaurant_id | int | Yes | Database ID of the restaurant (≥1) |
@@ -206,45 +211,31 @@ Access API docs at: `http://localhost:8000/docs`
 #### Response (200 OK)
 ```json
 {
-  "timestamp": "2026-05-10T14:40:00",
-  "restaurant": {
-    "restaurant_id": 123,
-    "name": "Local Italian Bistro",
-    "address": {
-      "full_address": "123 Main St, New York, NY 10001",
-      "latitude": 40.7150,
-      "longitude": -74.0080
-    },
-    "contact": {
-      "phone": "+1-212-555-0123",
-      "website": "https://www.localitalian.com"
-    },
-    "details": {
-      "is_featured": true,
-      "categories": ["Italian", "Fine Dining"],
-      "price_level": 2,
-      "price_label": "$$",
-      "rating": 4.7,
-      "user_rating_count": 245,
-      "is_local": true
-    },
-    "hours": {
+  "address": {
+    "full_address": "123 Main St, New York, NY 10001",
+    "latitude": 40.7150,
+    "longitude": -74.0080
+  },
+  "price_category": 2,
+  "categories": ["Italian", "Fine Dining"],
+  "hours": [
+    {
       "day_of_week": "Monday",
       "opening_time": "11:00",
       "closing_time": "22:00",
       "is_open": true,
       "is_overnight": false
     },
-    "services": {
-      "takeout": true,
-      "delivery": false,
-      "dine_in": true
-    },
-    "image_url": "https://place-image-url.com/image.jpg",
-    "source": "google",
-    "created_at": "2026-05-01T10:00:00",
-    "updated_at": "2026-05-10T14:00:00"
-  }
+    {
+      "day_of_week": "Tuesday",
+      "opening_time": "11:00",
+      "closing_time": "22:00",
+      "is_open": true,
+      "is_overnight": false
+    }
+  ],
+  "website": "https://www.localitalian.com",
+  "phone": "+1-212-555-0123"
 }
 ```
 
@@ -265,7 +256,7 @@ All endpoints are rate-limited based on IP address using the `slowapi` library.
 |----------|-------|---------|
 | `/discovery` | 10/minute | Automatic discovery requests |
 | `/search` | 20/minute | User-initiated searches |
-| `/restaurant/{id}` | 30/minute | Detail view requests |
+| `/restaurant/details` | 30/minute | Detail view requests |
 
 ### Rate Limit Headers
 ```

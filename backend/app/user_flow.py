@@ -151,6 +151,11 @@ def get_restaurants_from_google_api(
         # Convert miles to meters for Google API
         radius_meters = int(distance_miles * 1609.34)
         
+        logger.info(
+            f"Calling Google API: lat={user_latitude}, lon={user_longitude}, "
+            f"radius={radius_meters}m, category={category}, price={price_level}"
+        )
+        
         if use_text_search and search_query:
             # Use text search for natural language queries
             search_request = search_text_object()
@@ -174,6 +179,7 @@ def get_restaurants_from_google_api(
                 }
             }
             
+            logger.debug(f"Text search query: {search_query}")
             response = search_text(search_request)
             
         else:
@@ -192,6 +198,8 @@ def get_restaurants_from_google_api(
                 # Default: search for restaurant types
                 search_request.includedTypes = ["restaurant"]
             
+            logger.debug(f"Nearby search types: {search_request.includedTypes}")
+            
             # Location restriction
             search_request.locationRestriction = circle(
                 user_latitude, 
@@ -201,17 +209,27 @@ def get_restaurants_from_google_api(
             
             response = search_nearby(search_request)
         
-        return response.places
+        if response and response.places:
+            logger.info(f"Google API returned {len(response.places)} results")
+            return response.places
+        else:
+            logger.warning("Google API returned empty response")
+            return []
         
     except Exception as e:
-        logger.error(f"Error fetching from Google API: {e}")
+        logger.error(f"Error fetching from Google API: {e}", exc_info=True)
         return []
 
 
 def normalize_google_place_to_db_object(google_place: place, source: str = "google") -> restaurant_object:
     rest_obj = restaurant_object()
     
-    rest_obj.name = google_place.name
+    # Extract name - handle both string and dict formats
+    if isinstance(google_place.name, dict):
+        rest_obj.name = google_place.name.get('text', 'Unknown')
+    else:
+        rest_obj.name = google_place.name or 'Unknown'
+    
     rest_obj.google_place_id = google_place.id
     rest_obj.address = google_place.formattedAddress or google_place.shortFormattedAddress
     rest_obj.website_url = google_place.websiteUri
@@ -221,6 +239,14 @@ def normalize_google_place_to_db_object(google_place: place, source: str = "goog
     if google_place.location:
         rest_obj.latitude = google_place.location.get("latitude")
         rest_obj.longitude = google_place.location.get("longitude")
+    
+    # Extract types/categories
+    if hasattr(google_place, 'types') and google_place.types:
+        rest_obj.categories = google_place.types
+    elif hasattr(google_place, 'primaryType') and google_place.primaryType:
+        rest_obj.categories = [google_place.primaryType]
+    else:
+        rest_obj.categories = ["restaurant"]
     
     # Price level mapping
     if google_place.priceLevel:
@@ -245,13 +271,19 @@ def get_local_restaurants(restaurants: List[place]) -> List[place]:
     
     for restaurant in restaurants:
         try:
-            if determine_locality(restaurant):
+            is_local = determine_locality(restaurant)
+            if is_local:
                 local_restaurants.append(restaurant)
+                logger.debug(f"✓ Local: {restaurant.name}")
+            else:
+                logger.debug(f"✗ Chain: {restaurant.name}")
         except Exception as e:
             logger.warning(f"Error determining locality for {restaurant.name}: {e}")
             # If we can't determine, include it as potentially local
             local_restaurants.append(restaurant)
+            logger.debug(f"? Included (error check): {restaurant.name}")
     
+    logger.info(f"Locality filter: {len(local_restaurants)}/{len(restaurants)} restaurants passed")
     return local_restaurants
 
 
@@ -274,6 +306,7 @@ def update_database_with_new_restaurants(
                 existing.updated_at = datetime.utcnow()
                 session.commit()
                 inserted_ids.append(existing.id)
+                logger.debug(f"Updated existing restaurant: {rest_obj.name} (ID: {existing.id})")
             else:
                 # Create new record
                 new_restaurant = Restaurant(
@@ -289,14 +322,27 @@ def update_database_with_new_restaurants(
                     is_featured=rest_obj.is_featured,
                 )
                 session.add(new_restaurant)
+                session.flush()  # Get the ID without committing
+                
+                # Add categories
+                if rest_obj.categories:
+                    for category in rest_obj.categories:
+                        if category:  # Only add non-empty categories
+                            category_obj = RestaurantCategory(
+                                restaurant_id=new_restaurant.id,
+                                category=category
+                            )
+                            session.add(category_obj)
+                
                 session.commit()
                 inserted_ids.append(new_restaurant.id)
+                logger.debug(f"Inserted new restaurant: {rest_obj.name} (ID: {new_restaurant.id}) with categories: {rest_obj.categories}")
         
         return inserted_ids
         
     except Exception as e:
         session.rollback()
-        logger.error(f"Error updating database with restaurants: {e}")
+        logger.error(f"Error updating database with restaurants: {e}", exc_info=True)
         return []
     finally:
         session.close()
@@ -437,7 +483,7 @@ def search_restaurants(
 def get_discovery_recommendations(
     user_latitude: float,
     user_longitude: float,
-    num_recommendations: int = 3
+    num_recommendations: int = 20
 ) -> dict:
     """
     Get automatic recommendations for the Discovery View.
@@ -448,6 +494,13 @@ def get_discovery_recommendations(
     - Price category
     - Distance
     - Featured status
+    
+    Follows fallback pattern:
+    1. Check database for nearby restaurants
+    2. If not enough, call Google Maps API
+    3. Filter for local restaurants
+    4. Update database
+    5. Return recommendations
     
     Args:
         user_latitude: User's latitude
@@ -480,9 +533,9 @@ def get_discovery_recommendations(
         f"Getting discovery recommendations for ({user_latitude}, {user_longitude})"
     )
     
-    # Get restaurants from database, prioritizing featured and local ones
     session = SessionLocal()
     try:
+        # Step 1: Get restaurants from database, prioritizing featured and local ones
         restaurants = session.query(Restaurant).all()
         nearby_restaurants = []
         
@@ -499,6 +552,82 @@ def get_discovery_recommendations(
                     "db_obj": restaurant,
                     "distance": distance
                 })
+        
+        logger.info(f"Found {len(nearby_restaurants)} restaurants in database")
+        
+        # Step 2: If not enough results, call Google Maps API
+        if len(nearby_restaurants) < num_recommendations:
+            needed = num_recommendations - len(nearby_restaurants)
+            logger.info(f"Need {needed} more recommendations from Google API")
+            
+            # Multi-pass approach: keep requesting until we have enough local restaurants
+            max_attempts = 3
+            attempt = 0
+            all_local_places = []
+            
+            while len(all_local_places) < needed and attempt < max_attempts:
+                attempt += 1
+                logger.info(f"Google API request attempt {attempt}/{max_attempts}")
+                
+                # Get restaurants from Google API (broader search for discovery)
+                google_places = get_restaurants_from_google_api(
+                    user_latitude,
+                    user_longitude,
+                    distance_miles=DEFAULT_DISTANCE_MILES * 2.5,
+                    max_results=20,  # Max allowed by Google
+                    category=None,
+                    price_level=None,
+                    use_text_search=False,
+                    search_query=None
+                )
+                
+                logger.info(f"Got {len(google_places)} results from Google API (attempt {attempt})")
+                
+                # Filter for local restaurants
+                local_google_places = get_local_restaurants(google_places)
+                logger.info(f"Filtered to {len(local_google_places)} local restaurants (attempt {attempt})")
+                
+                # Add new local places to our collection (avoid duplicates by checking IDs)
+                existing_ids = {place.id for place in all_local_places}
+                for place in local_google_places:
+                    if place.id not in existing_ids:
+                        all_local_places.append(place)
+                        existing_ids.add(place.id)
+                
+                logger.info(f"Total local restaurants collected: {len(all_local_places)}")
+            
+            logger.info(f"Finished API requests. Collected {len(all_local_places)} local restaurants total")
+            
+            # Normalize and update database
+            normalized_restaurants = [
+                normalize_google_place_to_db_object(place_obj)
+                for place_obj in all_local_places
+            ]
+            
+            inserted_ids = update_database_with_new_restaurants(normalized_restaurants)
+            logger.info(f"Inserted/updated {len(inserted_ids)} restaurants in database")
+            
+            # Refresh session to see newly inserted restaurants
+            session.expire_all()
+            
+            # Add newly inserted restaurants to nearby list
+            if inserted_ids:
+                newly_inserted = session.query(Restaurant).filter(
+                    Restaurant.id.in_(inserted_ids)
+                ).all()
+                
+                for restaurant in newly_inserted:
+                    distance = calculate_distance(
+                        user_latitude,
+                        user_longitude,
+                        float(restaurant.latitude),
+                        float(restaurant.longitude)
+                    )
+                    
+                    nearby_restaurants.append({
+                        "db_obj": restaurant,
+                        "distance": distance
+                    })
         
         # Sort by: featured first, then by distance
         nearby_restaurants.sort(

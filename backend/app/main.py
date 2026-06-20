@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
+from starlette.requests import Request
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from slowapi import Limiter
@@ -25,7 +26,10 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Exception handler for rate limiting
@@ -37,9 +41,7 @@ async def rate_limit_handler(request, exc):
     )
 
 
-# ============================================================================
 # REQUEST/RESPONSE MODELS
-# ============================================================================
 
 class LocationRequest(BaseModel):
     """Base model for location-based requests"""
@@ -48,13 +50,8 @@ class LocationRequest(BaseModel):
 
 
 class DiscoveryRequest(LocationRequest):
-    """Discovery view request"""
-    num_recommendations: int = Field(
-        default=3,
-        ge=1,
-        le=10,
-        description="Number of recommendations to return"
-    )
+    """Discovery view request - location only"""
+    pass
 
 
 class RecommendationItem(BaseModel):
@@ -75,27 +72,27 @@ class DiscoveryResponse(BaseModel):
     recommendations: List[RecommendationItem]
 
 
-class SearchRequest(LocationRequest):
+class SearchRequest(BaseModel):
     """Map/Search view request"""
-    distance_miles: float = Field(
+    latitude: float = Field(..., ge=-90, le=90, description="User's latitude")
+    longitude: float = Field(..., ge=-180, le=180, description="User's longitude")
+    categories: Optional[List[str]] = Field(
+        default=None,
+        description="Restaurant category filters (multi-select)"
+    )
+    price_categories: Optional[List[int]] = Field(
+        default=None,
+        description="Price level filters (multi-select, 0=Free, 1=$, 2=$$, 3=$$$, 4=$$$$)"
+    )
+    distance_miles: Optional[float] = Field(
         default=10,
         ge=1,
         le=50,
-        description="Search radius in miles"
-    )
-    category: Optional[str] = Field(
-        default=None,
-        description="Restaurant category filter"
-    )
-    price_level: Optional[int] = Field(
-        default=None,
-        ge=0,
-        le=4,
-        description="Price level (0=Free, 1=$, 2=$$, 3=$$$, 4=$$$$)"
+        description="Search radius in miles (optional)"
     )
     search_query: Optional[str] = Field(
         default=None,
-        description="Text search query"
+        description="Text search query (search bar input)"
     )
 
 
@@ -137,17 +134,6 @@ class RestaurantContact(BaseModel):
     website: Optional[str] = None
 
 
-class RestaurantDetails(BaseModel):
-    """Restaurant details"""
-    is_featured: bool
-    categories: List[str]
-    price_level: Optional[int]
-    price_label: str
-    rating: Optional[float]
-    user_rating_count: Optional[int]
-    is_local: Optional[bool]
-
-
 class RestaurantHours(BaseModel):
     """Restaurant business hours"""
     day_of_week: str
@@ -157,40 +143,22 @@ class RestaurantHours(BaseModel):
     is_overnight: bool
 
 
-class RestaurantServices(BaseModel):
-    """Restaurant services"""
-    takeout: Optional[bool] = None
-    delivery: Optional[bool] = None
-    dine_in: Optional[bool] = None
-
-
-class Restaurant(BaseModel):
-    """Complete restaurant information"""
-    restaurant_id: int
-    name: str
+class RestaurantDetailResponse(BaseModel):
+    """Restaurant details for detail view"""
     address: RestaurantAddress
-    contact: RestaurantContact
-    details: RestaurantDetails
-    hours: Optional[RestaurantHours] = None
-    services: RestaurantServices
-    image_url: Optional[str] = None
-    source: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    price_category: Optional[int]
+    categories: List[str]
+    hours: Optional[List[RestaurantHours]] = None
+    website: Optional[str] = None
+    phone: Optional[str] = None
 
 
-class DetailResponse(BaseModel):
-    """Detail view response"""
-    timestamp: str
-    restaurant: Optional[Restaurant] = None
-    error: Optional[str] = None
-    restaurant_id: Optional[int] = None
+class DetailRequest(BaseModel):
+    """Detail view request - restaurant ID only"""
+    restaurant_id: int = Field(..., ge=1, description="Restaurant ID")
 
 
-# ============================================================================
 # ROUTES
-# ============================================================================
-
 @app.get("/", tags=["Health"])
 async def root():
     """Health check endpoint"""
@@ -206,16 +174,17 @@ async def root():
     status_code=200
 )
 @limiter.limit("10/minute")
-async def discovery(request, body: DiscoveryRequest):
+async def discovery(request: Request, body: DiscoveryRequest):
     """
     Get automatic restaurant recommendations.
     
-    Returns 3 local restaurants nearby for quick preview.
+    Returns local restaurants nearby for quick preview cards.
+    No filters - iOS app handles location only.
     
     Rate limit: 10 requests per minute
     
     Args:
-        body: DiscoveryRequest with user location and number of recommendations
+        body: DiscoveryRequest with user location only
         
     Returns:
         DiscoveryResponse with recommendations
@@ -230,8 +199,7 @@ async def discovery(request, body: DiscoveryRequest):
         
         result = get_discovery_recommendations(
             user_latitude=body.latitude,
-            user_longitude=body.longitude,
-            num_recommendations=body.num_recommendations
+            user_longitude=body.longitude
         )
         
         return result
@@ -253,17 +221,18 @@ async def discovery(request, body: DiscoveryRequest):
     status_code=200
 )
 @limiter.limit("20/minute")
-async def search(request, body: SearchRequest):
+async def search(request: Request, body: SearchRequest):
     """
-    Search for restaurants with filters.
+    Search for restaurants with optional filters.
     
-    Supports filtering by distance, category, and price level.
+    Supports filtering by distance, categories (multi-select), 
+    price categories (multi-select), and text search.
     Displays results on map view.
     
     Rate limit: 20 requests per minute
     
     Args:
-        body: SearchRequest with location and filter parameters
+        body: SearchRequest with location and optional filter parameters
         
     Returns:
         SearchResponse with filtered results
@@ -274,16 +243,22 @@ async def search(request, body: SearchRequest):
     try:
         logger.info(
             f"Search request for location ({body.latitude}, {body.longitude}) "
-            f"distance={body.distance_miles}mi, category={body.category}, "
-            f"price_level={body.price_level}"
+            f"distance={body.distance_miles}mi, categories={body.categories}, "
+            f"price_categories={body.price_categories}, search_query={body.search_query}"
         )
+        
+        # Handle multi-select categories - search with first category if provided
+        category = body.categories[0] if body.categories else None
+        
+        # Handle multi-select price categories - search with first price if provided
+        price_level = body.price_categories[0] if body.price_categories else None
         
         result = search_restaurants_with_filters(
             user_latitude=body.latitude,
             user_longitude=body.longitude,
             distance_miles=body.distance_miles,
-            category=body.category,
-            price_level=body.price_level,
+            category=category,
+            price_level=price_level,
             search_query=body.search_query
         )
         
@@ -297,43 +272,40 @@ async def search(request, body: SearchRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get(
-    "/restaurant/{restaurant_id}",
-    response_model=DetailResponse,
+@app.post(
+    "/restaurant/details",
+    response_model=RestaurantDetailResponse,
     summary="Get Restaurant Details",
-    description="Get full details for a restaurant in the detail view",
+    description="Get details for a restaurant in the detail view",
     tags=["Details"],
     status_code=200
 )
 @limiter.limit("30/minute")
-async def get_restaurant(request, restaurant_id: int = Query(..., ge=1)):
+async def get_restaurant_detail(request: Request, body: DetailRequest):
     """
     Get detailed information about a restaurant.
     
-    Returns comprehensive information for the detail view including
-    hours, categories, contact info, services, and more.
+    Returns details needed for the detail view:
+    - Address with coordinates
+    - Price category and restaurant categories
+    - Business hours
+    - Website and phone number
     
     Rate limit: 30 requests per minute
     
     Args:
-        restaurant_id: Database ID of the restaurant
+        body: DetailRequest with restaurant ID only
         
     Returns:
-        DetailResponse with restaurant details
+        RestaurantDetailResponse with required details
         
     Raises:
         HTTPException: 400 for invalid input, 404 if not found, 429 for rate limit exceeded
     """
     try:
-        if restaurant_id < 1:
-            raise HTTPException(
-                status_code=400,
-                detail="Restaurant ID must be a positive integer"
-            )
+        logger.info(f"Detail request for restaurant ID {body.restaurant_id}")
         
-        logger.info(f"Detail request for restaurant ID {restaurant_id}")
-        
-        result = get_restaurant_details(restaurant_id)
+        result = get_restaurant_details(body.restaurant_id)
         
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result.get("error"))
@@ -350,10 +322,7 @@ async def get_restaurant(request, restaurant_id: int = Query(..., ge=1)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# ============================================================================
 # ERROR HANDLERS
-# ============================================================================
-
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     """Custom HTTP exception handler"""
@@ -371,3 +340,4 @@ async def general_exception_handler(request, exc):
         status_code=500,
         content={"detail": "Internal server error"}
     )
+

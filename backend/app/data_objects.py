@@ -332,6 +332,7 @@ class restaurant_object:
         self.website_url = None
         self.image_url = None
         self.source = None  # 'google', 'curated', 'user_recommendation', 'partner'
+        self.categories = []  # List of category strings
         self.created_at = None
         self.updated_at = None
 

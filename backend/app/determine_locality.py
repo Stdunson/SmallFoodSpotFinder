@@ -1,4 +1,9 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 big_franchises = {
+    "7-Eleven",
     "85°C Bakery Cafe",
     "A&W Restaurants",
     "A&W",
@@ -720,19 +725,25 @@ def determine_locality(place) -> bool:
     Scoring system:
     - Strong signals: +2 points
     - Moderate signals: +1 point
-    - Threshold: 4+ points = local restaurant
+    - Threshold: 2+ points = local/regional restaurant
  
     True if restaurant appears to be local, False if likely a chain/franchise
     """
     score = 0
     
+    # Extract name - handle both string and dict formats from Google API
+    if isinstance(place.name, dict):
+        place_name = place.name.get('text', '')
+    else:
+        place_name = place.name or ""
+    
     # Check if restaurant name contains any chain name
-    place_name_lower = place.name.lower() if place.name else ""
+    place_name_lower = place_name.lower() if place_name else ""
     is_name_chain = any(
         chain_url in place_name_lower.replace("&", "and").replace("'", "").replace(" ", "-")
         for chain_url in big_franchises_url
     ) or any(
-        chain in place_name_lower for chain in big_franchises
+        chain.lower() in place_name_lower for chain in big_franchises
     )
     
     # Strong signal: No website domain (local businesses often lack online presence)
@@ -774,4 +785,5 @@ def determine_locality(place) -> bool:
     if is_name_chain:
         score -= 3
     
-    return score >= 4
+    logger.debug(f"Locality score for '{place_name}': {score} (chain={is_name_chain})")
+    return score >= 2

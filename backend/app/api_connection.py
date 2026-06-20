@@ -1,6 +1,8 @@
 #For Google Places API connection and data retrieval
 import requests
 import os
+import json
+import logging
 from dotenv import load_dotenv
 from app.data_objects import (
     search_nearby_object,
@@ -12,6 +14,8 @@ from app.data_objects import (
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 # API Configuration
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 GOOGLE_PLACES_BASE_URL = "https://places.googleapis.com/v1"
@@ -22,13 +26,14 @@ def _build_request_headers():
     return {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+        "X-Goog-FieldMask": "places.id,places.name,places.formattedAddress,places.shortFormattedAddress,places.location,places.types,places.primaryType,places.displayName,places.websiteUri,places.priceLevel,places.rating,places.userRatingCount,places.photos",
     }
 
 
 def _convert_place_response_to_object(place_data: dict) -> place:
     p = place()
     
-    p.name = place_data.get("name")
+    p.name = place_data.get("displayName")
     p.id = place_data.get("id")
     p.googleMapsUri = place_data.get("googleMapsUri")
     p.websiteUri = place_data.get("websiteUri")
@@ -219,7 +224,16 @@ def search_nearby(search_request: search_nearby_object) -> search_nearby_respons
     if search_request.routingParameters:
         payload["routingParameters"] = search_request.routingParameters
     
+    # Log request details
+    logger.debug(f"Google API Request URL: {url}")
+    logger.debug(f"Google API Request Payload: {json.dumps(payload, indent=2)}")
+    
     response = requests.post(url, json=payload, headers=headers)
+    
+    if response.status_code != 200:
+        logger.error(f"Google API Response Status: {response.status_code}")
+        logger.error(f"Google API Response Text: {response.text}")
+    
     response.raise_for_status()
     
     api_response = response.json()
@@ -305,7 +319,16 @@ def search_text(search_request: search_text_object) -> search_text_response_obje
     if search_request.searchAlongRouteParameters:
         payload["searchAlongRouteParameters"] = search_request.searchAlongRouteParameters
     
+    # Log request details
+    logger.debug(f"Google API Request URL: {url}")
+    logger.debug(f"Google API Request Payload: {json.dumps(payload, indent=2)}")
+    
     response = requests.post(url, json=payload, headers=headers)
+    
+    if response.status_code != 200:
+        logger.error(f"Google API Response Status: {response.status_code}")
+        logger.error(f"Google API Response Text: {response.text}")
+    
     response.raise_for_status()
     
     api_response = response.json()
