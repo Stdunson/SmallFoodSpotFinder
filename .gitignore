@@ -193,6 +193,7 @@ xcuserdata/
 *.xcarchive
 DerivedData/
 *.hmap
+.pbxproj
 
 # Swift Package Manager
 .build/
